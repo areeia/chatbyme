@@ -6,37 +6,13 @@
 <title>Anonette</title>
 <link href="https://fonts.googleapis.com/css2?family=VT323&family=Share+Tech+Mono&display=swap" rel="stylesheet"/>
 
-<!-- ============================================================
-  SETUP INSTRUCTIONS
-  1. Go to https://console.firebase.google.com
-  2. Create a new project (free)
-  3. Add a Web App, copy the firebaseConfig object
-  4. Go to Realtime Database → Create database → Start in test mode
-  5. Replace the firebaseConfig below with your own values
-  6. In Realtime Database → Rules, add an index for auto-deletion:
-     {
-       "rules": {
-         ".read": true, ".write": true,
-         "rooms": {
-           "$room": {
-             "messages": { ".indexOn": ["epoch"] }
-           }
-         }
-       }
-     }
-  7. Deploy index.html to Netlify (drag & drop at app.netlify.com)
-     or Vercel (import from GitHub)
-  8. Done! Share yoursite.netlify.app/#roomname to invite people
-     For private rooms: share the full link including ?t=TOKEN
-================================================================ -->
-
 <script type="module">
   import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
   import { getDatabase, ref, push, onChildAdded, get, set, remove, query, orderByChild, endAt, serverTimestamp }
     from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
 
   // ▼▼▼ REPLACE THIS WITH YOUR FIREBASE CONFIG ▼▼▼
-  const firebaseConfig = {
+   const firebaseConfig = {
     apiKey: "AIzaSyDhQji3eZAc9px6EfcsnbTploNdy4_ADwE",
     authDomain: "myanonette.firebaseapp.com",
     databaseURL: "https://myanonette-default-rtdb.asia-southeast1.firebasedatabase.app",
@@ -54,11 +30,62 @@
 
   // ── State ──────────────────────────────────────────────────
   let myNick = "";
+  let myUUID = "";
   let curRoom = "";
-  let curToken = "";   // secret token for private rooms
+  let curToken = "";
   let msgListener = null;
 
-  // ── Parse URL: hash = "roomId" or "roomId?t=TOKEN" ────────
+  // ── UUID: get or generate a persistent browser identity ───
+  function getUUID() {
+    let id = localStorage.getItem("anonette_uuid");
+    if (!id) {
+      id = crypto.randomUUID ? crypto.randomUUID()
+        : ([1e7]+-1e3+-4e3+-8e3+-1e11).replace(/[018]/g, c =>
+            (c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> c / 4).toString(16));
+      localStorage.setItem("anonette_uuid", id);
+    }
+    return id;
+  }
+
+  // ── Auto-login: check if this browser already has a nick ──
+  async function tryAutoLogin() {
+    myUUID = getUUID();
+    const savedNick = localStorage.getItem("anonette_nick");
+    if (!savedNick) { showNickModal(); return; }
+
+    // verify UUID still owns that nick in Firebase
+    const snap = await get(ref(db, "nicks/" + savedNick));
+    if (snap.exists() && snap.val().uuid === myUUID) {
+      // returning user — skip modal
+      myNick = savedNick;
+      document.getElementById("cur-nick").textContent = myNick;
+      document.getElementById("nick-modal").style.display = "none";
+      const { roomId, token } = parseHash();
+      joinRoom(roomId || "general", token);
+    } else if (snap.exists() && snap.val().uuid !== myUUID) {
+      // nick was claimed by someone else (rare), clear local and show modal
+      localStorage.removeItem("anonette_nick");
+      showNickModal("That nickname was claimed by another device. Pick a new one.");
+    } else {
+      // nick not in Firebase yet (cleared DB?) — re-register it
+      await set(ref(db, "nicks/" + savedNick), { uuid: myUUID, since: Date.now() });
+      myNick = savedNick;
+      document.getElementById("cur-nick").textContent = myNick;
+      document.getElementById("nick-modal").style.display = "none";
+      const { roomId, token } = parseHash();
+      joinRoom(roomId || "general", token);
+    }
+  }
+
+  function showNickModal(errMsg) {
+    document.getElementById("nick-modal").style.display = "flex";
+    const err = document.getElementById("nick-error");
+    if (errMsg) { err.textContent = errMsg; err.style.display = "block"; }
+    else err.style.display = "none";
+    document.getElementById("nick-input").focus();
+  }
+
+  // ── Parse URL ─────────────────────────────────────────────
   function parseHash() {
     const raw = decodeURIComponent(location.hash.slice(1));
     const [roomPart, queryPart] = raw.split("?");
@@ -66,16 +93,48 @@
     return { roomId: roomPart, token: params.get("t") || "" };
   }
 
-  // ── Nick modal ─────────────────────────────────────────────
-  window.setNick = function() {
+  // ── Set nick: check availability then lock to UUID ────────
+  window.setNick = async function() {
     const inp = document.getElementById("nick-input");
+    const btn = document.getElementById("join-btn");
     let n = inp.value.trim().replace(/[^a-zA-Z0-9_\-]/g, "");
     if (!n) n = "anon_" + Math.floor(Math.random() * 9999);
+
+    btn.textContent = "[ CHECKING... ]";
+    btn.disabled = true;
+
+    myUUID = getUUID();
+    const nickRef = ref(db, "nicks/" + n);
+    const snap = await get(nickRef);
+
+    if (snap.exists() && snap.val().uuid !== myUUID) {
+      // nickname taken by a different browser
+      document.getElementById("nick-error").textContent = "Nickname already taken. Try another.";
+      document.getElementById("nick-error").style.display = "block";
+      btn.textContent = "[ ENTER THE VOID ]";
+      btn.disabled = false;
+      return;
+    }
+
+    // register or re-confirm ownership
+    await set(nickRef, { uuid: myUUID, since: Date.now() });
+    localStorage.setItem("anonette_nick", n);
+    localStorage.setItem("anonette_uuid", myUUID);
+
     myNick = n;
     document.getElementById("cur-nick").textContent = myNick;
     document.getElementById("nick-modal").style.display = "none";
+    btn.textContent = "[ ENTER THE VOID ]";
+    btn.disabled = false;
+
     const { roomId, token } = parseHash();
     joinRoom(roomId || "general", token);
+  };
+
+  // ── Change nick ────────────────────────────────────────────
+  window.showNickModalChange = function() {
+    document.getElementById("nick-input").value = myNick;
+    showNickModal();
   };
 
   // ── Room join ──────────────────────────────────────────────
@@ -311,11 +370,11 @@
     document.getElementById("msg-input").addEventListener("keydown", e => { if (e.key === "Enter") sendMsg(); });
     document.getElementById("nick-input").addEventListener("keydown", e => { if (e.key === "Enter") setNick(); });
     document.getElementById("new-room-input").addEventListener("keydown", e => { if (e.key === "Enter") createRoom(); });
-    document.getElementById("nick-input").focus();
+    tryAutoLogin();
   });
 
   window.showNickModal = () => {
-    document.getElementById("nick-modal").style.display = "flex";
+    showNickModal();
   };
 </script>
 
@@ -472,7 +531,7 @@
   <div id="titlebar">
     <div class="logo">&#9608; ANONETTE</div>
     <div class="spacer"></div>
-    <button class="nick-btn" onclick="showNickModal()">NICK: <span id="cur-nick">???</span></button>
+    <button class="nick-btn" onclick="showNickModalChange()">NICK: <span id="cur-nick">???</span></button>
   </div>
 
   <div id="main">
@@ -521,6 +580,7 @@
     <div id="nick-box">
       <h2>ANONETTE</h2>
       <p>PICK A NICKNAME TO ENTER.<br/>NO ACCOUNT. NO LOGS. NO TRACES.</p>
+      <div id="nick-error" style="display:none;font-size:11px;color:#ff4444;margin-bottom:10px;"></div>
       <input id="nick-input" placeholder="your_nickname" maxlength="20" autocomplete="off"/>
       <button id="join-btn" onclick="setNick()">[ ENTER THE VOID ]</button>
     </div>
