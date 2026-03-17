@@ -206,8 +206,6 @@
       const id = child.key;
       const meta = child.val().meta || {};
       if (meta.private) return; // hide private rooms from sidebar
-      const isCreator = meta.creator === myNick;
-
       const div = document.createElement("div");
       div.className = "room-item" + (id === curRoom ? " active" : "");
 
@@ -217,14 +215,12 @@
       label.onclick = () => joinRoom(id, "");
       div.appendChild(label);
 
-      if (isCreator) {
-        const del = document.createElement("span");
-        del.className = "room-del";
-        del.textContent = "✕";
-        del.title = "Delete room";
-        del.onclick = (e) => { e.stopPropagation(); confirmDeleteRoom(id); };
-        div.appendChild(del);
-      }
+      const del = document.createElement("span");
+      del.className = "room-del";
+      del.textContent = "✕";
+      del.title = "Delete room";
+      del.onclick = (e) => { e.stopPropagation(); confirmDeleteRoom(id); };
+      div.appendChild(del);
 
       list.appendChild(div);
     });
